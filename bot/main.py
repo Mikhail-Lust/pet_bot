@@ -2,7 +2,6 @@ from db import get_animals_by_color
 from aiogram import types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from aiogram.filters import CommandStart
-from config import TOKEN
 from db import (
     update_subscription_status,  # Функция: update_subscription_status(user_id, toggle=False/True)
     get_user_channels,  # Возвращает список каналов для данного user_id
@@ -23,6 +22,18 @@ from datetime import datetime
 
 from aiogram.types import CallbackQuery,InlineKeyboardMarkup
 from db import add_channel_to_db, get_user_channels, remove_channel_from_db  # Импортируем функции работы с БД
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env
+load_dotenv()
+
+# Получаем токен
+TOKEN = os.getenv("TOKEN")
+
+# Проверяем, загружен ли токен
+if TOKEN is None:
+    raise ValueError("Переменная окружения TOKEN не найдена! Проверьте файл .env.")
 
 # Инициализация
 bot = Bot(token=TOKEN, parse_mode="HTML")
