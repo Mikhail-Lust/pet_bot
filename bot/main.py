@@ -1,7 +1,16 @@
-from db import get_animals_by_color
-from aiogram import types, F
+from aiogram import F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
+from aiogram import Bot, Dispatcher
+import asyncio
+import logging
+from aiogram import types
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram import Router
+from db import add_channel_to_db, get_user_channels, remove_channel_from_db  # Импортируем функции работы с БД
+import os
+from dotenv import load_dotenv
 from db import (
     update_subscription_status,  # Функция: update_subscription_status(user_id, toggle=False/True)
     get_user_channels,  # Возвращает список каналов для данного user_id
@@ -13,17 +22,8 @@ from db import (
     get_all_users_for_subscription,  # Возвращает всех пользователей для рассылки
     get_animal_by_id,  # Возвращает информацию о животном по ID
     update_user_filter,  init_db,  get_all_animals,
-    get_animals_by_filter
+    get_animals_by_filter, get_subscription_status, get_animals_by_color
 )
-from aiogram import Bot, Dispatcher
-import asyncio
-import logging
-from datetime import datetime
-
-from aiogram.types import CallbackQuery,InlineKeyboardMarkup
-from db import add_channel_to_db, get_user_channels, remove_channel_from_db  # Импортируем функции работы с БД
-import os
-from dotenv import load_dotenv
 
 # Загружаем переменные из .env
 load_dotenv()
@@ -38,11 +38,10 @@ if TOKEN is None:
 # Инициализация
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
-
 logging.basicConfig(level=logging.INFO)
 
 
-# ======================== КНОПКИ ========================
+# ======================== КЛАВИАТУРЫ ========================
 
 def main_keyboard():
     """ Главное меню """
@@ -64,11 +63,6 @@ def filters_keyboard():
         [InlineKeyboardButton(text="🔙 Выйти", callback_data="exit_filters")]  # Добавили кнопку выхода
     ])
     return keyboard
-
-@dp.callback_query(F.data == "exit_filters")
-async def exit_filters(callback: CallbackQuery):
-    """ Возвращает пользователя в главное меню """
-    await callback.message.edit_text("Вы вернулись в главное меню.", reply_markup=main_keyboard())
 
 
 def subscription_keyboard(user_id):
@@ -146,21 +140,13 @@ def reset_settings_keyboard():
 
 # ======================== ХЭНДЛЕРЫ ========================
 
+
 @dp.message(CommandStart())
 async def start(message: Message):
     """ Стартовое сообщение """
     await message.answer(
         "Добро пожаловать! Этот бот помогает находить питомцев из приюта.",
         reply_markup=main_keyboard()
-    )
-
-
-@dp.message(CommandStart())
-async def start(message: Message):
-    """ Стартовое сообщение """
-    await message.answer(
-        "Добро пожаловать! Этот бот помогает находить питомцев из приюта.",
-        reply_markup=main_keyboard()  # Замените на вашу клавиатуру
     )
 
 
@@ -194,7 +180,10 @@ async def choose_filters(callback: CallbackQuery):
     """ Настроить фильтры """
     await callback.message.edit_text("Выберите фильтр:", reply_markup=filters_keyboard())
 
-
+@dp.callback_query(F.data == "exit_filters")
+async def exit_filters(callback: CallbackQuery):
+    """ Возвращает пользователя в главное меню """
+    await callback.message.edit_text("Вы вернулись в главное меню.", reply_markup=main_keyboard())
 
 # Обработчик фильтров по типу или выбору окраски
 @dp.callback_query(F.data.startswith("filter_"))
@@ -285,7 +274,7 @@ async def manage_subscription(callback: CallbackQuery):
 async def back_to_main(callback: CallbackQuery):
     await callback.message.edit_text("Главное меню", reply_markup=main_keyboard())
 
-from db import get_subscription_status
+
 @dp.callback_query(F.data == 'toggle_subscription')
 async def toggle_subscription_status(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
@@ -295,7 +284,7 @@ async def toggle_subscription_status(callback_query: CallbackQuery):
     new_status = 1 if current_status == 0 else 0
     update_subscription_status(user_id, new_status)  # Обновляем статус в БД
 
-    status_message = "Рассылка включена." if new_status == 1 else "Рассылка выключена."
+    status_message = "✅Рассылка включена.✅" if new_status == 1 else "❌Рассылка выключена.❌"
 
     # Редактируем сообщение, чтобы отобразить новый статус
     await callback_query.message.edit_text(
@@ -306,22 +295,15 @@ async def toggle_subscription_status(callback_query: CallbackQuery):
     # Подтверждаем нажатие callback
     await callback_query.answer(f"Статус рассылки изменен на: {status_message}")
 
-from aiogram import types
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram import Router
-from aiogram.filters import StateFilter
 
-from db import add_channel_to_db, get_user_channels, remove_channel_from_db  # Импортируем функции работы с БД
 
+#ДОБАВИТЬ/УДАЛИТЬ КАНАЛ
 # Инициализация роутера
 router = Router()
 
 
 class AddChannel(StatesGroup):
     wait_for_channel = State()  # Состояние ожидания ссылки канала
-
 
 # Обработчик кнопки для добавления канала
 @router.callback_query(lambda c: c.data == 'add_channel')
@@ -330,7 +312,6 @@ async def add_channel(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.message.answer("Пожалуйста, отправьте ссылку на канал или группу (например, @channel_name):")
     # Переходим в режим ожидания канала
     await state.set_state(AddChannel.wait_for_channel)
-
 
 
 # Обработчик для обработки канала, который был отправлен пользователем
@@ -379,6 +360,7 @@ async def process_channel(message: types.Message, state: FSMContext):
     # Завершаем процесс
     await state.clear()  # Используем clear() вместо finish()
 
+
 # Обработчик кнопки для удаления канала
 @router.callback_query(lambda c: c.data == 'remove_channel')
 async def remove_channel(callback_query: CallbackQuery):
@@ -413,23 +395,9 @@ async def process_channel_removal(callback_query: CallbackQuery):
     await callback_query.message.answer(f"Канал {channel_to_remove} успешно удален.")
 
 
-# Важно: Не забывайте добавить роутер в диспетчер!
 dp.include_router(router)  # Это добавит все обработчики из router в диспетчер
 
-from aiogram.types import CallbackQuery
 
-
-from db import get_db_connection, save_send_time_to_db, get_send_time_from_db, update_user_send_settings, get_user_send_settings, reset_send_settings
-
-@dp.callback_query(lambda c: c.data == "set_send_time")
-async def set_send_time_handler(callback_query: CallbackQuery):
-    """Обрабатывает нажатие на кнопку 'Установить время рассылки'"""
-    await callback_query.message.answer(
-        "Настройте параметры рассылки:",
-        reply_markup=time_settings_keyboard()  # Клавиатура настроек времени рассылки
-    )
-
-from aiogram import types
 
 
 
