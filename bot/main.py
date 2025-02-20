@@ -2,6 +2,8 @@ from aiogram import F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from aiogram.filters import CommandStart, StateFilter
 from aiogram import Bot, Dispatcher
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 import asyncio
 import logging
 from aiogram import types
@@ -22,7 +24,7 @@ from db import (
     get_all_users_for_subscription,  # Возвращает всех пользователей для рассылки
     get_animal_by_id,  # Возвращает информацию о животном по ID
     update_user_filter,  init_db,  get_all_animals,
-    get_animals_by_filter, get_subscription_status, get_animals_by_color
+    get_animals_by_filter, get_subscription_status, get_animals_by_color, get_animals_by_filters,get_max_age
 )
 
 # Загружаем переменные из .env
@@ -39,7 +41,7 @@ if TOKEN is None:
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
-
+router = Router()
 
 # ======================== КЛАВИАТУРЫ ========================
 
@@ -51,18 +53,25 @@ def main_keyboard():
     ])
     return keyboard
 
+def filters_keyboard(selected_filters: dict) -> InlineKeyboardMarkup:
+    """Клавиатура выбора фильтров с отметками выбранных опций"""
+    def mark_selected(text, key):
+        # Для возраста проверяем оба параметра
+        if key == "age":
+            age_selected = "age_min" in selected_filters and "age_max" in selected_filters
+            return f"✔ {text}" if age_selected else text
+        return f"✔ {text}" if key in selected_filters else text
 
-def filters_keyboard():
-    """ Клавиатура выбора фильтров """
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🐶 Только собачки", callback_data="filter_dogs")],
-        [InlineKeyboardButton(text="🐱 Только кошечки", callback_data="filter_cats")],
-        [InlineKeyboardButton(text="🎨 По окраске", callback_data="filter_color")],
-        [InlineKeyboardButton(text="📅 По возрасту", callback_data="filter_age")],
+        [InlineKeyboardButton(text=mark_selected("🐶 Только собачки", "dogs"), callback_data="filter_dogs")],
+        [InlineKeyboardButton(text=mark_selected("🐱 Только кошечки", "cats"), callback_data="filter_cats")],
+        [InlineKeyboardButton(text=mark_selected("🎨 По окраске", "color"), callback_data="filter_color")],
+        [InlineKeyboardButton(text=mark_selected("📅 По возрасту", "age"), callback_data="filter_age")],
         [InlineKeyboardButton(text="✅ Показать", callback_data="show_filtered")],
-        [InlineKeyboardButton(text="🔙 Выйти", callback_data="exit_filters")]  # Добавили кнопку выхода
+        [InlineKeyboardButton(text="🔙 Выйти", callback_data="exit_filters")]
     ])
     return keyboard
+
 
 
 def subscription_keyboard(user_id):
@@ -77,15 +86,24 @@ def subscription_keyboard(user_id):
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Функция, возвращающая клавиатуру для выбора окраса
-def color_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Рыжий", callback_data="color_рыжий")],
-        [InlineKeyboardButton(text="Черный", callback_data="color_черный")],
-        [InlineKeyboardButton(text="Коричневый", callback_data="color_коричневый")],
-        [InlineKeyboardButton(text="Белый", callback_data="color_белый")],
-        [InlineKeyboardButton(text="🔙 Выйти", callback_data="exit_filters")]
+
+def color_keyboard(selected_colors: list) -> InlineKeyboardMarkup:
+    """ Клавиатура выбора окраса с отметками выбранных цветов """
+    colors = ["Рыжий", "Черный", "Коричневый", "Белый"]
+
+    def mark_selected(color):
+        return f"✔ {color}" if color in selected_colors else color
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=mark_selected(color), callback_data=f"color_{color}")] for color in colors
     ])
+
+    # Добавляем кнопку "🔙 Вернуться к фильтрам"
+    keyboard.inline_keyboard.append(
+        [InlineKeyboardButton(text="🔙 Вернуться к фильтрам", callback_data="back_to_filters")])
+    return keyboard
+
+
 
 def subscription_keyboard() -> InlineKeyboardMarkup:
     """ Клавиатура для управления рассылкой """
@@ -175,71 +193,179 @@ async def show_all_animals(callback: CallbackQuery):
     await callback.message.edit_text("Все доступные животные:", reply_markup=keyboard)
 
 
+
 @dp.callback_query(F.data == "view_filtered")
-async def choose_filters(callback: CallbackQuery):
-    """ Настроить фильтры """
-    await callback.message.edit_text("Выберите фильтр:", reply_markup=filters_keyboard())
+async def choose_filters(callback: CallbackQuery, state: FSMContext):
+    """ Открывает меню выбора фильтров """
+    data = await state.get_data()
+    selected_filters = data.get("filters", {})
+
+    current_text = callback.message.text
+    new_text = "Выберите фильтр:"
+
+    # Проверяем, изменился ли текст или клавиатура
+    current_keyboard = callback.message.reply_markup
+    new_keyboard = filters_keyboard(selected_filters)
+
+    if current_text != new_text or current_keyboard != new_keyboard:
+        await callback.message.edit_text(new_text, reply_markup=new_keyboard)
+
 
 @dp.callback_query(F.data == "exit_filters")
-async def exit_filters(callback: CallbackQuery):
-    """ Возвращает пользователя в главное меню """
+async def exit_filters(callback: CallbackQuery, state: FSMContext):
+    """ Возвращает в главное меню и сбрасывает фильтры """
+    await state.clear()
     await callback.message.edit_text("Вы вернулись в главное меню.", reply_markup=main_keyboard())
 
-# Обработчик фильтров по типу или выбору окраски
+@dp.callback_query(F.data == "back_to_filters")
+async def back_to_filters(callback: CallbackQuery, state: FSMContext):
+    """ Возвращает к выбору фильтров, сохраняя данные """
+    # Получаем текущие фильтры из состояния
+    data = await state.get_data()
+    filters = data.get("filters", {})
+
+    # Показываем клавиатуру с фильтрами
+    await callback.message.edit_text("Выберите фильтр:", reply_markup=filters_keyboard(filters))
+
 @dp.callback_query(F.data.startswith("filter_"))
-async def set_filter(callback: CallbackQuery):
-    # Извлекаем параметр фильтра из callback data
+async def set_filter(callback: CallbackQuery, state: FSMContext):
+    """ Устанавливает или убирает фильтр """
     filter_param = callback.data.split("_")[1]
+
+    data = await state.get_data()
+    filters = data.get("filters", {})
+
+    # Обрабатываем фильтр по окраске отдельно
     if filter_param == "color":
-        # Если выбран фильтр по окраске, выводим клавиатуру выбора окрасов
-        await callback.message.edit_text("Выберите окрас:", reply_markup=color_keyboard())
+        selected_colors = filters.get("color", [])
+        await callback.message.edit_text("Выберите окрас:", reply_markup=color_keyboard(selected_colors))
         return
 
-    # Если выбран фильтр по типу, например "cats" или "dogs"
-    # Приводим значение к нужному формату (например, "cats" -> "cat")
-    mapping = {
-        "cats": "cat",
-        "dogs": "dog",
-        "cat": "cat",
-        "dog": "dog"
-    }
-    filter_value = mapping.get(filter_param, filter_param)
-    # Получаем животных по фильтру (функция должна быть реализована в db.py)
-    animals = get_animals_by_filter(filter_value)
-    if not animals:
-        await callback.answer("По этому фильтру животных нет.", show_alert=True)
-        return
+    # Переключаем состояние фильтра
+    if filter_param in filters:
+        del filters[filter_param]
+    else:
+        filters[filter_param] = True
 
-    # Создаем клавиатуру с кнопками для каждого найденного животного
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🐾 {animal['name']}", callback_data=f"animal_{animal['id']}")]
-        for animal in animals
-    ])
-    await callback.message.edit_text("Результаты по фильтру:", reply_markup=keyboard)
+    # Обновляем состояние
+    await state.update_data(filters=filters)
 
-# Обработчик фильтра по окраске
+    await callback.message.edit_text("Выберите фильтр:", reply_markup=filters_keyboard(filters))
+
+
 @dp.callback_query(F.data.startswith("color_"))
-async def filter_by_color(callback: CallbackQuery):
-    # Извлекаем выбранный окрас (все символы после первого подчёркивания)
+async def filter_by_color(callback: CallbackQuery, state: FSMContext):
+    """ Добавляет/удаляет выбранный окрас в фильтрах """
     color = callback.data.split("_", 1)[1]
-    # Получаем животных по окраске (функция должна быть реализована в db.py)
-    animals = get_animals_by_color(color)
-    if not animals:
-        await callback.answer("Животных с таким окрасом нет.", show_alert=True)
+
+    data = await state.get_data()
+    filters = data.get("filters", {})
+    selected_colors = filters.get("color", [])
+
+    if color in selected_colors:
+        selected_colors.remove(color)
+    else:
+        selected_colors.append(color)
+
+    filters["color"] = selected_colors
+    # Обновляем состояние
+    await state.update_data(filters=filters)
+
+    await callback.message.edit_text("Выберите окрас:", reply_markup=color_keyboard(selected_colors))
+
+@dp.callback_query(F.data == "show_filtered")
+async def show_filtered(callback: CallbackQuery, state: FSMContext):
+    """ Отображает животных по выбранным фильтрам """
+    data = await state.get_data()
+    filters = data.get("filters", {})
+
+    if not filters:
+        await callback.answer("Выберите хотя бы один фильтр!", show_alert=True)
         return
 
-    # Формируем клавиатуру для отображения найденных животных
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🐾 {animal['name']}", callback_data=f"animal_{animal['id']}")]
-        for animal in animals
-    ])
-    await callback.message.edit_text(f"Животные с окрасом {color}:", reply_markup=keyboard)
+    # Получаем животных по всем фильтрам (AND)
+    animals = get_animals_by_filters(filters)
 
-# Обработчик кнопки выхода из фильтров
-@dp.callback_query(F.data == "exit_filters")
-async def exit_filters(callback: CallbackQuery):
-    # Функция main_keyboard() должна возвращать основное меню вашего бота
-    await callback.message.edit_text("Вы вернулись в главное меню.", reply_markup=main_keyboard())
+    if not animals:
+        await callback.answer("Животные по этим фильтрам не найдены. Попробуйте изменить параметры!", show_alert=True)
+        return
+
+    # Формируем клавиатуру с найденными животными
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🐾 {animal[1]}", callback_data=f"animal_{animal[0]}")]
+        for animal in animals  # Предположим, что animal[0] - это id, animal[1] - это name
+    ])
+    await callback.message.edit_text("Результаты по фильтрам:", reply_markup=keyboard)
+
+
+# Обработчик начала выбора возраста
+@dp.callback_query(F.data == "filter_age")
+async def start_age_filter(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс выбора возраста"""
+    # Сбрасываем предыдущие значения возраста
+    await state.update_data(age_min=None, age_max=None)
+
+    max_age_db = get_max_age()
+    await callback.message.edit_text(
+        "Выберите минимальный возраст:",
+        reply_markup=age_keyboard(0, max_age_db, "min")
+    )
+    await state.set_state("waiting_min_age")
+
+
+# Обработчик выбора минимального возраста
+@dp.callback_query(F.data.startswith("age_min_"))
+async def set_min_age(callback: CallbackQuery, state: FSMContext):
+    """Сохраняет минимальный возраст и запрашивает максимальный"""
+    min_age = int(callback.data.split("_")[2])
+    await state.update_data(age_min=min_age)
+
+    max_age_db = get_max_age()
+    await callback.message.edit_text(
+        "Выберите максимальный возраст:",
+        reply_markup=age_keyboard(min_age, max_age_db, "max")
+    )
+    await state.set_state("waiting_max_age")
+
+
+# Обработчик выбора максимального возраста
+@dp.callback_query(F.data.startswith("age_max_"))
+async def set_max_age(callback: CallbackQuery, state: FSMContext):
+    """Сохраняет максимальный возраст и обновляет фильтры"""
+    data = await state.get_data()
+    min_age = data.get("age_min", 0)
+    max_age = int(callback.data.split("_")[2])
+
+    if max_age < min_age:
+        await callback.answer("❗ Максимальный возраст должен быть больше минимального!", show_alert=True)
+        return
+
+    # Обновляем фильтры в состоянии
+    current_data = await state.get_data()
+    filters = current_data.get("filters", {})
+    filters["age_min"] = min_age
+    filters["age_max"] = max_age
+    await state.update_data(filters=filters)
+
+    await back_to_filters(callback, state)
+
+
+def age_keyboard(start_age: int, end_age: int, mode: str) -> InlineKeyboardMarkup:
+    """Генерирует клавиатуру для выбора возраста"""
+    buttons = []
+    for age in range(start_age, end_age + 1):
+        if age % 3 == 0 and age != start_age:
+            buttons.append([])
+        callback_data = f"age_{mode}_{age}"
+        buttons[-1].append(InlineKeyboardButton(text=str(age), callback_data=callback_data))
+
+    # Добавляем кнопку возврата
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_filters")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+
 
 
 @dp.callback_query(F.data.startswith("animal_"))
