@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime
 import logging
+db = sqlite3.connect('animals.db')
 
 # ── Функция для подключения к базе данных ──
 def get_db_connection():
@@ -62,6 +63,40 @@ def get_animals_by_color(color):
 def get_animal_by_id(animal_id: int):
     with get_db_connection() as conn:
         return conn.execute("SELECT * FROM animals WHERE id = ?", (animal_id,)).fetchone()
+
+def get_animals_by_filters(filters):
+    """ Получает животных по всем выбранным фильтрам (AND) """
+    query = "SELECT * FROM animals WHERE 1=1"
+    params = []
+
+    if "dogs" in filters:
+        query += " AND type = ?"
+        params.append("dog")
+
+    if "cats" in filters:
+        query += " AND type = ?"
+        params.append("cat")
+
+    if "color" in filters and filters["color"]:
+        placeholders = ",".join(["?"] * len(filters["color"]))
+        query += f" AND LOWER(color) IN ({placeholders})"
+        params.extend([color.lower() for color in filters["color"]])
+
+    if "age_min" in filters and filters["age_min"]:
+        query += " AND age >= ?"
+        params.append(filters["age_min"])
+
+    if "age_max" in filters and filters["age_max"]:
+        query += " AND age <= ?"
+        params.append(filters["age_max"])
+
+    return db.execute(query, params).fetchall()
+
+def get_max_age():
+    """ Возвращает максимальный возраст животного в базе данных """
+    query = "SELECT MAX(age) FROM animals"
+    result = db.execute(query).fetchone()
+    return result[0] if result else 0  # Возвращаем 0, если данных нет
 
 # ── Функции работы с пользователями ──
 def get_user(user_id):
@@ -156,13 +191,6 @@ def remove_channel_from_db(user_id, channel_id):
     with get_db_connection() as conn:
         conn.execute("DELETE FROM user_channels WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
 
-def get_db_connection():
-    """ Функция для подключения к базе данных """
-    conn = sqlite3.connect('animals.db')
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 # ── Логирование ──
 logging.basicConfig(level=logging.INFO)
 
@@ -181,14 +209,6 @@ def set_send_time(user_id: int, time: str) -> None:
     send_time = datetime.strptime(time, "%H:%M")  # Преобразуем строку в объект datetime
     save_send_time_to_db(user_id, send_time)  # Функция для сохранения времени в базе данных
 
-import sqlite3
-from datetime import datetime
-
-# Функция для подключения к базе данных
-def get_db_connection():
-    conn = sqlite3.connect('animals.db')
-    conn.row_factory = sqlite3.Row
-    return conn
 
 # ── Функция для сохранения времени рассылки в базе данных ──
 def save_send_time_to_db(user_id: int, send_time: datetime):
@@ -291,16 +311,3 @@ async def update_user_send_settings(user_id: int, send_time: str, message_count:
     )
     conn.commit()
     conn.close()
-
-def delete_duplicates():
-    with get_db_connection() as conn:
-        conn.execute('''
-            DELETE FROM animals
-            WHERE id NOT IN (
-                SELECT id FROM (
-                    SELECT MIN(id) AS id
-                    FROM animals
-                    GROUP BY name, type, age, color, photo_url, contact, source
-                )
-            );
-        ''')
