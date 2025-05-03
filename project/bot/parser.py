@@ -163,7 +163,7 @@ async def main():
     conn = init_db()
     all_animals = []
     base_url = 'https://less-homeless.com/find-your-best-friend-today/page/{}/'
-    max_pages = 15
+    max_pages = 16
 
     logging.info(f"Парсинг начат, максимум страниц: {max_pages}")
     async with aiohttp.ClientSession() as session:

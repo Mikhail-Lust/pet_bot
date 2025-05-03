@@ -1075,19 +1075,17 @@ async def main():
     scheduler.start()
     logging.info("Планировщик запущен")
 
-    # Запуск бота
-    dp.include_router(router)
-    await dp.start_polling(bot)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
 # ======================== Запуск бота ========================
 
 async def start_bot():
     dp.include_router(router)
     await dp.start_polling(bot)
 
+
+#     # Запуск бота
+#     dp.include_router(router)
+#     await dp.start_polling(bot)
 
 # if __name__ == "__main__":
 #     asyncio.run(main())
