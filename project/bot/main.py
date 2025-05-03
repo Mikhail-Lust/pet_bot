@@ -40,6 +40,9 @@ router = Router()
 # Путь к базе данных
 DB_PATH = os.path.join(os.path.dirname(__file__), 'pets.db')
 
+# Глобальный планировщик
+scheduler = AsyncIOScheduler()
+
 
 # Подключение к базе данных
 def get_db_connection():
@@ -311,11 +314,15 @@ def add_channel(chat_id: int, filters: dict = None, schedule: str = "0 10 * * *"
         conn = get_db_connection()
         c = conn.cursor()
         filters_json = json.dumps(filters) if filters else "{}"
+        logging.info(f"Сохранение канала {chat_id} с фильтрами {filters_json} и расписанием {schedule}")
         c.execute("INSERT OR REPLACE INTO channels (chat_id, filters, schedule, is_active) VALUES (?, ?, ?, 1)",
                   (chat_id, filters_json, schedule))
         conn.commit()
         conn.close()
-        logging.info(f"Канал {chat_id} добавлен с фильтрами {filters_json} и расписанием {schedule}")
+        logging.info(f"Канал {chat_id} успешно добавлен в базу")
+
+        # Динамически добавляем задачу в планировщик
+        schedule_broadcast(chat_id, schedule)
     except sqlite3.Error as e:
         logging.error(f"Ошибка при добавлении канала: {e}")
 
@@ -337,68 +344,123 @@ def get_channels():
 
 
 def remove_channel(chat_id: int):
-    """Удалить канал из базы"""
+    """Удалить канал из базы и задачу из планировщика"""
     try:
+        # Удаление канала из базы данных
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
         affected_rows = c.rowcount
         conn.commit()
         conn.close()
-        logging.info(f"Канал {chat_id} удалён, затронуто строк: {affected_rows}")
-        return affected_rows > 0
+        logging.info(f"Канал {chat_id} удалён из базы, затронуто строк: {affected_rows}")
+
+        # Удаление задачи из планировщика
+        job_id = str(chat_id)  # Приводим chat_id к строке, так как apscheduler использует строковые идентификаторы
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+            logging.info(f"Задача рассылки для канала {chat_id} удалена из планировщика")
+        else:
+            logging.info(f"Задача для канала {chat_id} не найдена в планировщике")
+
+        return affected_rows > 0  # Возвращаем True, если канал был удалён
+
     except sqlite3.Error as e:
-        logging.error(f"Ошибка при удалении канала: {e}")
+        logging.error(f"Ошибка при удалении канала из базы: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"Ошибка при удалении задачи из планировщика: {e}")
         return False
 
 
-async def broadcast_animal():
-    """Отправить случайного питомца в активные каналы"""
+def schedule_broadcast(chat_id: int, schedule: str):
+    """Добавить или обновить задачу рассылки для конкретного канала"""
+    try:
+        if not schedule.strip():
+            logging.error(f"Пустое расписание для канала {chat_id}")
+            return
+        # Удаляем старую задачу, если она существует
+        if scheduler.get_job(str(chat_id)):
+            scheduler.remove_job(str(chat_id))
+            logging.info(f"Старая задача для канала {chat_id} удалена")
+
+        # Добавляем новую задачу, передавая chat_id
+        scheduler.add_job(
+            broadcast_animal_for_channel,
+            trigger=CronTrigger.from_crontab(schedule),
+            args=[chat_id],
+            id=str(chat_id)
+        )
+        logging.info(f"Задача рассылки добавлена для канала {chat_id} с расписанием {schedule}")
+    except ValueError as e:
+        logging.error(f"Ошибка при добавлении задачи для канала {chat_id}: {e}")
+
+
+async def broadcast_animal_for_channel(chat_id: int):
+    """Отправить случайного питомца в указанный канал"""
     channels = get_channels()
-    logging.info(f"Запуск рассылки для {len(channels)} каналов")
+    channel = next((c for c in channels if c["chat_id"] == chat_id), None)
+
+    if not channel:
+        logging.error(f"Канал {chat_id} не найден в базе")
+        return
+
+    if not channel["is_active"]:
+        logging.info(f"Канал {chat_id} неактивен, пропуск")
+        return
+
+    filters = channel["filters"]
+    logging.info(f"Применение фильтров для канала {chat_id}: {filters}")
+    animals = get_animals_by_filters(filters)
+
+    if not animals:
+        logging.info(f"Для канала {chat_id} не найдено животных по фильтрам {filters}")
+        return
+
+    animal = random.choice(animals)
+    text = (
+        f"🐾 <b>{animal['name']}</b>\n\n"
+        f"📅 <b>Возраст:</b> {animal['age']}\n"
+        f"⚤ <b>Пол:</b> {animal['sex']}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Перейти на сайт", url=animal['description'] if animal['description'].startswith(
+            'http') else 'https://less-homeless.com')]
+    ])
+
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=animal['photo_url'],
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        logging.info(f"Отправлен питомец {animal['name']} в канал {chat_id}")
+    except Exception as e:
+        logging.error(f"Ошибка при отправке фото в канал {chat_id}: {e}")
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            logging.info(f"Отправлен текстовый питомец {animal['name']} в канал {chat_id}")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке текста в канал {chat_id}: {e}")
+
+
+async def broadcast_animal():
+    """Ручной запуск рассылки во все активные каналы (для отладки)"""
+    channels = get_channels()
+    logging.info(f"Ручной запуск рассылки для {len(channels)} каналов")
+
     for channel in channels:
         if not channel["is_active"]:
             logging.info(f"Канал {channel['chat_id']} неактивен, пропуск")
             continue
-        chat_id = channel["chat_id"]
-        filters = channel["filters"]
-        logging.info(f"Применение фильтров для канала {chat_id}: {filters}")
-        animals = get_animals_by_filters(filters)
-        if not animals:
-            logging.info(f"Для канала {chat_id} не найдено животных по фильтрам {filters}")
-            continue
-        animal = random.choice(animals)
-        text = (
-            f"🐾 <b>{animal['name']}</b>\n\n"
-            f"📅 <b>Возраст:</b> {animal['age']}\n"
-            f"⚤ <b>Пол:</b> {animal['sex']}"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Перейти на сайт",
-                                  url=animal['description'] if animal['description'].startswith(
-                                      'http') else 'https://less-homeless.com')]
-        ])
-        try:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=animal['photo_url'],
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-            logging.info(f"Отправлен питомец {animal['name']} в канал {chat_id}")
-        except Exception as e:
-            logging.error(f"Ошибка при отправке фото в канал {chat_id}: {e}")
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-                logging.info(f"Отправлен текстовый питомец {animal['name']} в канал {chat_id}")
-            except Exception as e:
-                logging.error(f"Ошибка при отправке текста в канал {chat_id}: {e}")
+        await broadcast_animal_for_channel(channel["chat_id"])
 
 
 # ======================== Обработчики ========================
@@ -409,48 +471,6 @@ async def start(message: Message):
     await message.answer("Добро пожаловать! Этот бот помогает найти питомцев из приюта.",
                          reply_markup=main_keyboard())
 
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-# Глобальный планировщик (должен быть доступен для динамического управления)
-scheduler = AsyncIOScheduler()
-
-
-def schedule_broadcast(chat_id: int, schedule: str):
-    """Добавить или обновить задачу рассылки в планировщике"""
-    try:
-        # Удаляем старую задачу, если она существует
-        if scheduler.get_job(str(chat_id)):
-            scheduler.remove_job(str(chat_id))
-            logging.info(f"Старая задача для канала {chat_id} удалена")
-
-        # Добавляем новую задачу
-        scheduler.add_job(
-            broadcast_animal,
-            trigger=CronTrigger.from_crontab(schedule),
-            id=str(chat_id)
-        )
-        logging.info(f"Задача рассылки добавлена для канала {chat_id} с расписанием {schedule}")
-    except ValueError as e:
-        logging.error(f"Ошибка при добавлении задачи для канала {chat_id}: {e}")
-
-
-def add_channel(chat_id: int, filters: dict = None, schedule: str = "0 10 * * *"):
-    """Добавить канал в базу для рассылки"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        filters_json = json.dumps(filters) if filters else "{}"
-        c.execute("INSERT OR REPLACE INTO channels (chat_id, filters, schedule, is_active) VALUES (?, ?, ?, 1)",
-                  (chat_id, filters_json, schedule))
-        conn.commit()
-        conn.close()
-        logging.info(f"Канал {chat_id} добавлен с фильтрами {filters_json} и расписанием {schedule}")
-
-        # Динамически добавляем задачу в планировщик
-        schedule_broadcast(chat_id, schedule)
-    except sqlite3.Error as e:
-        logging.error(f"Ошибка при добавлении канала: {e}")
 
 @router.message(FilterStates.waiting_channel_id)
 async def process_channel_id(message: Message, state: FSMContext):
@@ -502,7 +522,6 @@ async def cmd_list_channels(message: Message):
     await message.answer(text)
 
 
-
 @router.callback_query(lambda c: c.data == "manage_broadcast")
 async def manage_broadcast(callback: CallbackQuery):
     """Открыть меню управления рассылкой"""
@@ -518,55 +537,21 @@ async def start_add_channel(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FilterStates.waiting_channel_id)
 
 
-def remove_channel(chat_id: int):
-    """Удалить канал из базы и задачу из планировщика"""
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
-        affected_rows = c.rowcount
-        conn.commit()
-        conn.close()
-        logging.info(f"Канал {chat_id} удалён из базы, затронуто строк: {affected_rows}")
-
-        # Удаляем задачу из планировщика
-        if scheduler.get_job(str(chat_id)):
-            scheduler.remove_job(str(chat_id))
-            logging.info(f"Задача рассылки для канала {chat_id} удалена из планировщика")
-        else:
-            logging.info(f"Задача для канала {chat_id} не найдена в планировщике")
-
-        return affected_rows > 0
-    except sqlite3.Error as e:
-        logging.error(f"Ошибка при удалении канала из базы: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"Ошибка при удалении задачи из планировщика: {e}")
-        return False
-
-
-@router.callback_query(lambda c: c.data.startswith("remove_channel_"))
+@router.callback_query(lambda c: c.data.startswith("remove_channel"))
 async def process_remove_channel(callback: CallbackQuery):
     """Удалить выбранный канал"""
     try:
         chat_id = int(callback.data.split("_")[2])
         logging.info(f"Попытка удаления канала {chat_id}")
+
         if remove_channel(chat_id):
-            await callback.message.edit_text(
-                f"Канал {chat_id} успешно удалён.",
-                reply_markup=broadcast_management_keyboard()
-            )
+            await callback.message.answer(f"Канал {chat_id} успешно удалён.")
         else:
-            await callback.message.edit_text(
-                f"Канал {chat_id} не найден или не удалён.",
-                reply_markup=broadcast_management_keyboard()
-            )
+            await callback.message.answer(f"Канал {chat_id} не найден или не удалён.")
+
     except Exception as e:
         logging.error(f"Ошибка при обработке удаления канала: {e}")
-        await callback.message.edit_text(
-            "Ошибка при удалении канала.",
-            reply_markup=broadcast_management_keyboard()
-        )
+        await callback.message.answer("Ошибка при удалении канала.")
 
 
 @router.callback_query(lambda c: c.data == "list_channels")
@@ -638,7 +623,9 @@ async def start_broadcast_sex_filter(callback: CallbackQuery, state: FSMContext)
 async def set_sex(callback: CallbackQuery, state: FSMContext):
     """Установить пол в фильтрах"""
     prefix = "broadcast_" if callback.data.startswith("broadcast_") else ""
-    sex = callback.data.split("_")[1]
+    # Разбиваем callback.data и берём последний элемент как пол
+    parts = callback.data.split("_")
+    sex = parts[-1]  # Пол всегда последний
     data = await state.get_data()
     filters = data.get("filters", {})
     filters["sex"] = sex
@@ -681,7 +668,9 @@ async def start_broadcast_age_filter(callback: CallbackQuery, state: FSMContext)
 async def set_min_age(callback: CallbackQuery, state: FSMContext):
     """Установить минимальный возраст"""
     prefix = "broadcast_" if callback.data.startswith("broadcast_") else ""
-    min_age = int(callback.data.split("_")[2])
+    # Разбиваем callback.data и берём последний элемент как возраст
+    parts = callback.data.split("_")
+    min_age = int(parts[-1])  # Возраст всегда последний
     await state.update_data(age_min=min_age)
     max_age = get_max_age()
     if max_age <= min_age:
@@ -697,9 +686,11 @@ async def set_min_age(callback: CallbackQuery, state: FSMContext):
 async def set_max_age(callback: CallbackQuery, state: FSMContext):
     """Установить максимальный возраст"""
     prefix = "broadcast_" if callback.data.startswith("broadcast_") else ""
+    # Разбиваем callback.data и берём последний элемент как возраст
+    parts = callback.data.split("_")
+    max_age = int(parts[-1])  # Возраст всегда последний
     data = await state.get_data()
     min_age = data.get("age_min", 0)
-    max_age = int(callback.data.split("_")[2])
 
     if max_age < min_age:
         await callback.answer("Максимальный возраст должен быть больше минимального!", show_alert=True)
@@ -807,8 +798,9 @@ async def save_broadcast_filters(callback: CallbackQuery, state: FSMContext):
     add_channel(chat_id, filters=filters, schedule=schedule)
     logging.info(f"Фильтры для канала {chat_id} сохранены: {filters}, расписание: {schedule}")
     await callback.message.edit_text("Фильтры и расписание для канала сохранены.",
-                                    reply_markup=broadcast_management_keyboard())
+                                     reply_markup=broadcast_management_keyboard())
     await state.set_state(None)
+
 
 @router.callback_query(lambda c: c.data.startswith("animal_"))
 async def show_animal_details(callback: CallbackQuery, state: FSMContext):
@@ -895,43 +887,25 @@ async def main():
     # Инициализация базы данных
     init_db()
 
-    # Настройка планировщика
-    scheduler = AsyncIOScheduler()
-    channels = get_channels()
-    for channel in channels:
-        if channel["is_active"]:
-            try:
-                scheduler.add_job(
-                    broadcast_animal,
-                    trigger=CronTrigger.from_crontab(channel["schedule"]),
-                    id=str(channel["chat_id"])
-                )
-                logging.info(
-                    f"Задача рассылки добавлена для канала {channel['chat_id']} с расписанием {channel['schedule']}")
-            except ValueError as e:
-                logging.error(f"Некорректное расписание для канала {channel['chat_id']}: {e}")
-    scheduler.start()
-
-
-async def main():
-    # Инициализация базы данных
-    init_db()
-
     # Инициализация и запуск планировщика
     global scheduler
+    scheduler.remove_all_jobs()  # Очистка старых задач
+    logging.info("Все старые задачи удалены")
     channels = get_channels()
     for channel in channels:
         if channel["is_active"]:
             try:
                 scheduler.add_job(
-                    broadcast_animal,
+                    broadcast_animal_for_channel,
                     trigger=CronTrigger.from_crontab(channel["schedule"]),
+                    args=[channel["chat_id"]],
                     id=str(channel["chat_id"])
                 )
                 logging.info(
                     f"Задача рассылки добавлена для канала {channel['chat_id']} с расписанием {channel['schedule']}")
             except ValueError as e:
                 logging.error(f"Некорректное расписание для канала {channel['chat_id']}: {e}")
+    logging.info(f"Текущие задачи: {[job.id for job in scheduler.get_jobs()]}")
     scheduler.start()
     logging.info("Планировщик запущен")
 
