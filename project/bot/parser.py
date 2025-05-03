@@ -203,5 +203,5 @@ async def run_scheduler():
         logging.info("Планировщик остановлен")
 
 
-if __name__ == "__main__":
-    asyncio.run(run_scheduler())
+# if __name__ == "__main__":
+#     asyncio.run(run_scheduler())

@@ -451,9 +451,10 @@ async def back_to_list(callback: CallbackQuery, state: FSMContext):
 
 # ======================== Запуск бота ========================
 
-async def main():
+async def start_bot():
     dp.include_router(router)
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+# if __name__ == "__main__":
+#     asyncio.run(main())
