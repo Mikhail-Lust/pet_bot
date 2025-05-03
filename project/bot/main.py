@@ -225,7 +225,7 @@ def broadcast_management_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить канал", callback_data="add_channel")],
         [InlineKeyboardButton(text="📋 Список каналов", callback_data="list_channels")],
-        [InlineKeyboardButton(text="🗑 Удалить канал", callback_data="remove_channel")],
+        [InlineKeyboardButton(text="🗑 Удалить канал", callback_data="start_remove_channel")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
 
@@ -537,7 +537,7 @@ async def start_add_channel(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FilterStates.waiting_channel_id)
 
 
-@router.callback_query(lambda c: c.data.startswith("remove_channel"))
+@router.callback_query(lambda c: c.data.startswith("remove_channel_"))
 async def process_remove_channel(callback: CallbackQuery):
     """Удалить выбранный канал"""
     try:
@@ -545,31 +545,117 @@ async def process_remove_channel(callback: CallbackQuery):
         logging.info(f"Попытка удаления канала {chat_id}")
 
         if remove_channel(chat_id):
-            await callback.message.answer(f"Канал {chat_id} успешно удалён.")
+            await callback.message.edit_text(
+                f"Канал {chat_id} успешно удалён.", reply_markup=broadcast_management_keyboard()
+            )
         else:
-            await callback.message.answer(f"Канал {chat_id} не найден или не удалён.")
+            await callback.message.edit_text(
+                f"Канал {chat_id} не найден или не удалён.", reply_markup=broadcast_management_keyboard()
+            )
 
     except Exception as e:
         logging.error(f"Ошибка при обработке удаления канала: {e}")
-        await callback.message.answer("Ошибка при удалении канала.")
+        await callback.message.edit_text(
+            "Ошибка при удалении канала.", reply_markup=broadcast_management_keyboard()
+        )
 
 
-@router.callback_query(lambda c: c.data == "list_channels")
-async def callback_list_channels(callback: CallbackQuery):
-    """Показать список каналов через callback"""
+@router.callback_query(lambda c: c.data == "start_remove_channel")
+async def start_remove_channel(callback: CallbackQuery):
+    """Начать процесс удаления канала, показав список каналов для выбора"""
     channels = get_channels()
-    logging.info(f"Callback запрос списка каналов, получено: {channels}")
     if not channels:
         await callback.message.edit_text(
             "Нет привязанных каналов.", reply_markup=broadcast_management_keyboard()
         )
         return
-    text = "Привязанные каналы:\n"
-    for channel in channels:
-        status = "активен" if channel["is_active"] else "отключён"
+
+    # Создаём клавиатуру с кнопками для каждого канала
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"ID: {channel['chat_id']}", callback_data=f"remove_channel_{channel['chat_id']}")]
+        for channel in channels
+    ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="manage_broadcast")]])
+
+    await callback.message.edit_text("Выберите канал для удаления:", reply_markup=keyboard)
+
+
+def cron_to_human_readable(cron: str) -> str:
+    """Конвертировать cron-выражение в человеко-читаемый формат, совместимый с parse_schedule"""
+    try:
+        parts = cron.split()
+        if len(parts) != 5:
+            return "Некорректное расписание"
+
+        minute, hour, day, month, day_of_week = parts
+
+        # Формируем время
+        time_str = f"{hour.zfill(2)}:{minute.zfill(2)}"
+
+        # Определяем день недели, используя тот же словарь, что в parse_schedule
+        days = {
+            "*": "ежедневно",
+            "mon": "понедельник",
+            "tue": "вторник",
+            "wed": "среда",
+            "thu": "четверг",
+            "fri": "пятница",
+            "sat": "суббота",
+            "sun": "воскресенье"
+        }
+
+        day_str = days.get(day_of_week.lower(), None)
+        if not day_str:
+            return "Некорректный день недели"
+
+        # Формируем строку в формате, совместимом с parse_schedule
+        if day_str == "ежедневно":
+            return f"ежедневно в {time_str}"
+        return f"каждый {day_str} в {time_str}"
+
+    except Exception as e:
+        logging.error(f"Ошибка при конвертации cron: {cron}, {e}")
+        return "Некорректное расписание"
+
+@router.callback_query(lambda c: c.data == "list_channels")
+async def callback_list_channels(callback: CallbackQuery):
+    """Показать список каналов через callback в красивом формате"""
+    channels = get_channels()
+    logging.info(f"Callback запрос списка каналов, получено: {channels}")
+
+    if not channels:
+        await callback.message.edit_text(
+            "📬 Нет привязанных каналов.",
+            reply_markup=broadcast_management_keyboard(),
+            parse_mode="HTML"
+        )
+        return
+
+    # Формируем заголовок
+    text = "📋 <b>Список привязанных каналов:</b>\n\n"
+
+    for idx, channel in enumerate(channels, 1):
+        status = "🟢 Активен" if channel["is_active"] else "🔴 Отключён"
         filters = channel["filters"] or "без фильтров"
-        text += f"ID: {channel['chat_id']}, Фильтры: {filters}, Расписание: {channel['schedule']}, Статус: {status}\n"
-    await callback.message.edit_text(text, reply_markup=broadcast_management_keyboard())
+
+        # Конвертируем cron-расписание в человеко-читаемый формат
+        schedule_str = cron_to_human_readable(channel["schedule"])
+
+        # Формируем информацию о канале
+        text += (
+            f"<b>{idx}. Канал:</b>\n"
+            f"🆔 <b>ID:</b> {channel['chat_id']}\n"
+            f"🔍 <b>Фильтры:</b> {filters}\n"
+            f"⏰ <b>Расписание:</b> {schedule_str}\n"
+            f"📡 <b>Статус:</b> {status}\n\n"
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=broadcast_management_keyboard(),
+        parse_mode="HTML"
+    )
+
+
 
 
 @router.callback_query(lambda c: c.data == "view_all")
