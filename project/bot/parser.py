@@ -187,7 +187,7 @@ async def main():
 async def run_scheduler():
     logging.info("Настройка планировщика")
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(main, 'cron', hour=13, minute=00)  # Запуск каждый день в 13:16
+    scheduler.add_job(main, 'cron', hour=13, minute=00)  # Запуск каждый день в 13:00
     scheduler.start()
     logging.info("Планировщик запущен, следующее обновление в 13:00")
 
