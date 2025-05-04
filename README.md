@@ -101,16 +101,18 @@
 ## Технологии
 | компонент продукта | техническое решение |
 | ----------- | ----------- |
-| бот телеграм   | aiogram   |
-| парсер сайта приюта   | fake_headers, BeautifulSoup (bs4)   |
-| база данных | SQLite |
-| автоматизация задач | APScheduler |
+| бот телеграм   | ![Aiogram](https://img.shields.io/badge/Aiogram-blue)   |
+| парсер сайта приюта   | ![fake-headers](https://img.shields.io/badge/fake-headers-yellow), ![BeautifulSoup](https://img.shields.io/badge/BeautifulSoup%20(bs4)-green)   |
+| база данных | ![SQLite](https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white) |
+| автоматизация задач | ![APScheduler](https://img.shields.io/badge/APScheduler-orange) |
+
+![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)   ![Telegram](https://img.shields.io/badge/Telegram-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)  
 ---
 ### технические подробности 
 1. парсер
 - работает **асинхронно и обходит блокировки** благодаря fake_headers. **обновляет данные в базе данных кадый день в 13:00** по московскому времени
 2. бот
-- работает на aiogram, **использует состояния и стандартные возможности библиотеки**\
+- работает на aiogram, **использует состояния и стандартные возможности библиотеки**
 3. app.py
 - сердце проекта. в нем распологается **одновременный запуск парсера и бота**, с помощью него **они могут работать непрерывно и не мешая друг другу**
 ---
